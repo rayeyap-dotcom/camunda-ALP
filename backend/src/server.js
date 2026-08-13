@@ -175,19 +175,80 @@ async function getDashboardReports(dashboardId) {
     }
   );
 
+  // The export endpoint returns the whole collection bundle for the requested
+  // dashboard: every report entity the dashboard uses, plus the dashboard
+  // entity itself (exportEntityType: 'dashboard'), all as siblings in one
+  // flat array. The dashboard entity references its reports via `tiles`
+  // (an array of {id, type: 'optimize_report'} — no name/data), so report
+  // names and data have to be looked up from the sibling entities by id.
   const payload = Array.isArray(response.data) ? response.data : [response.data];
-  const dashboardDefinition = payload.find((item) => item && item.id === dashboardId) || payload[0] || {};
-  const reports = Array.isArray(dashboardDefinition?.widgets) ? dashboardDefinition.widgets : Array.isArray(dashboardDefinition?.reports) ? dashboardDefinition.reports : [];
+  const dashboardDefinition = payload.find((item) => item && item.id === dashboardId && item.exportEntityType === 'dashboard');
+  if (!dashboardDefinition) {
+    return emptyDashboardState(dashboardId);
+  }
+
+  const reportEntitiesById = new Map(
+    payload
+      .filter((item) => item && item.exportEntityType && item.exportEntityType !== 'dashboard')
+      .map((item) => [item.id, item])
+  );
+
+  const tiles = Array.isArray(dashboardDefinition.tiles) ? dashboardDefinition.tiles : [];
+  const reports = tiles
+    .filter((tile) => tile.type === 'optimize_report' && tile.id)
+    .map((tile) => {
+      const entity = reportEntitiesById.get(tile.id);
+      return {
+        id: tile.id,
+        name: entity?.name || 'Report',
+        visualization: entity?.data?.visualization || 'unknown',
+      };
+    });
 
   return {
     dashboardId,
     name: dashboardDefinition.name || dashboardId,
-    reports: reports.map((report) => ({
-      id: report.id || report.reportId || report.key,
-      name: report.name || report.title || 'Report',
-      type: report.type || report.kind || 'unknown',
-      definition: report,
-    })),
+    reports,
+  };
+}
+
+function rowsAreProcessScoped(rows) {
+  return rows.some(
+    (row) =>
+      row &&
+      typeof row === 'object' &&
+      ('processDefinitionKey' in row || 'processDefinitionId' in row || 'processId' in row || 'processKey' in row)
+  );
+}
+
+async function buildReportInsight(report, processId) {
+  const reportId = report.id || report.reportId;
+  if (!reportId) {
+    return { ...report, resultType: 'unknown', data: [], dataPreview: [], totalRecords: 0, processId };
+  }
+
+  const result = await getReportData(reportId, { limit: 50, paginationTimeout: 60 });
+  const rawData = result.data;
+
+  if (typeof rawData === 'number') {
+    return { ...report, resultType: 'number', value: rawData, data: [], dataPreview: [], totalRecords: 1, processId };
+  }
+
+  const rows = Array.isArray(rawData) ? rawData : [];
+  // Row-level process filtering only makes sense for raw-data list reports
+  // (each row carries its own processDefinitionKey); grouped/aggregate
+  // reports (key/value/label rows) are already scoped to a single process
+  // by the report definition itself, so filtering them here would wipe out
+  // every row.
+  const filteredRows = rowsAreProcessScoped(rows) ? filterRowsByProcess(rows, processId) : rows;
+
+  return {
+    ...report,
+    resultType: Array.isArray(rawData) ? 'map' : 'unknown',
+    totalRecords: filteredRows.length || result.totalNumberOfRecords || rows.length,
+    data: filteredRows,
+    dataPreview: filteredRows.slice(0, 10),
+    processId,
   };
 }
 
@@ -392,24 +453,7 @@ app.get('/api/dashboard/:dashboardId/insights', async (req, res) => {
     const dashboardSummary = await getDashboardReports(dashboardId);
 
     const reports = await Promise.all(
-      (dashboardSummary.reports || []).map(async (report) => {
-        const reportId = report.id || report.reportId;
-        if (!reportId) {
-          return { ...report, data: [], dataPreview: [], totalRecords: 0, processId };
-        }
-
-        const data = await getReportData(reportId, { limit: 50, paginationTimeout: 60 });
-        const rows = Array.isArray(data.data) ? data.data : [];
-        const filteredRows = filterRowsByProcess(rows, processId);
-
-        return {
-          ...report,
-          totalRecords: filteredRows.length || data.totalNumberOfRecords || rows.length,
-          data: filteredRows,
-          dataPreview: filteredRows.slice(0, 10),
-          processId,
-        };
-      })
+      (dashboardSummary.reports || []).map((report) => buildReportInsight(report, processId))
     );
 
     res.json({
@@ -436,24 +480,7 @@ app.get('/api/collection/:collectionId/insights', async (req, res) => {
         const dashboardSummary = await getDashboardReports(dashboardId);
 
         const reports = await Promise.all(
-          (dashboardSummary.reports || []).map(async (report) => {
-            const reportId = report.id || report.reportId;
-            if (!reportId) {
-              return { ...report, data: [], dataPreview: [], totalRecords: 0, processId };
-            }
-
-            const data = await getReportData(reportId, { limit: 20, paginationTimeout: 60 });
-            const rows = Array.isArray(data.data) ? data.data : [];
-            const filteredRows = filterRowsByProcess(rows, processId);
-
-            return {
-              ...report,
-              totalRecords: filteredRows.length || data.totalNumberOfRecords || rows.length,
-              data: filteredRows,
-              dataPreview: filteredRows.slice(0, 10),
-              processId,
-            };
-          })
+          (dashboardSummary.reports || []).map((report) => buildReportInsight(report, processId))
         );
 
         return {

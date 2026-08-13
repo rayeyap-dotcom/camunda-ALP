@@ -6,6 +6,8 @@ const dashboardId = import.meta.env.VITE_DASHBOARD_ID || 'e601bcb9-b11a-4086-9ae
 const processDefinitionKey = import.meta.env.VITE_PROCESS_ID || 'Process_1dwlliq'
 const processInstanceKey = import.meta.env.VITE_PROCESS_INSTANCE_KEY || ''
 
+const PIE_COLORS = ['#f59e0b', '#f97316', '#fbbf24', '#fdba74', '#fb923c', '#eab308']
+
 function formatNumber(value, digits = 2) {
   const num = Number(value)
   if (!Number.isFinite(num)) return '0'
@@ -188,50 +190,28 @@ function App() {
   }
 
   const renderDashboardVisual = (report) => {
-    const rows = Array.isArray(report.dataPreview) ? report.dataPreview : report.data || []
-    const rowKeys = rows[0] ? Object.keys(rows[0]) : []
-    const textKeys = rowKeys.filter((key) => /token|cost|amount|total|count|value/i.test(key))
-    const chartKeys = rowKeys.filter((key) => /duration|time|latency/i.test(key))
-    const pieKeys = rowKeys.filter((key) => /composition|breakdown|segment|category|type/i.test(key))
-
-    if (textKeys.length && !chartKeys.length && !pieKeys.length) {
+    if (report.resultType === 'number') {
       return (
         <div className="metric-badges">
-          {rows.slice(0, 4).map((row, index) => {
-            const key = textKeys[0] || Object.keys(row)[0]
-            return (
-              <div key={`${report.id}-${index}`} className="metric-badge">
-                <span>{key}</span>
-                <strong>{formatNumber(row[key], 2)}</strong>
-              </div>
-            )
-          })}
+          <div className="metric-badge">
+            <span>{report.name}</span>
+            <strong>{formatNumber(report.value, 2)}</strong>
+          </div>
         </div>
       )
     }
 
-    if (chartKeys.length || report.type === 'chart') {
-      return (
-        <div className="mini-bars" aria-label="Duration chart">
-          {rows.slice(0, 6).map((row, index) => {
-            const value = Math.max(...Object.values(row || {}).filter((value) => typeof value === 'number'), 0)
-            const label = row.date || row.label || `Item ${index + 1}`
-            return (
-              <div key={`${report.id}-bar-${index}`} className="mini-bar-group">
-                <span className="mini-bar" style={{ height: `${Math.min(100, value)}%` }} />
-                <small>{String(label).slice(0, 6)}</small>
-              </div>
-            )
-          })}
-        </div>
-      )
+    const rows = Array.isArray(report.dataPreview) ? report.dataPreview : []
+    if (!rows.length) {
+      return <div className="empty-state">No data available.</div>
     }
 
-    if (pieKeys.length || /composition|breakdown/i.test(report.name || '')) {
-      const pieData = rows.slice(0, 4).map((row, index) => ({
-        label: row.label || row.category || row.name || `Segment ${index + 1}`,
-        value: Number(Object.values(row)[0]) || 0,
-        color: ['#f59e0b', '#f97316', '#fbbf24', '#fdba74'][index % 4],
+    // Grouped/aggregate Optimize reports return rows shaped { key, label, value }.
+    if (report.visualization === 'pie') {
+      const pieData = rows.slice(0, 6).map((row, index) => ({
+        label: row.label || row.key || `Segment ${index + 1}`,
+        value: Number(row.value) || 0,
+        color: PIE_COLORS[index % PIE_COLORS.length],
       }))
       const pieStyle = buildPieStyle(pieData)
 
@@ -250,12 +230,16 @@ function App() {
       )
     }
 
+    const maxValue = Math.max(...rows.map((row) => Number(row.value) || 0), 1)
     return (
-      <div className="table-list">
-        {rows.slice(0, 4).map((row, index) => (
-          <div key={`${report.id}-row-${index}`} className="table-row">
-            <span>{row.date || row.label || row.name || 'Metric'}</span>
-            <strong>{Object.values(row)[0] ?? 0}</strong>
+      <div className="mini-bars" aria-label={`${report.name} chart`}>
+        {rows.slice(0, 8).map((row, index) => (
+          <div key={`${report.id}-bar-${index}`} className="mini-bar-group">
+            <span
+              className="mini-bar"
+              style={{ height: `${Math.min(100, ((Number(row.value) || 0) / maxValue) * 100)}%` }}
+            />
+            <small title={row.label || row.key}>{String(row.label || row.key || `#${index + 1}`).slice(0, 8)}</small>
           </div>
         ))}
       </div>
