@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    working_dir: /app
+    command: npm run dev
+    env_file:
+      - ./backend/.env
+    environment:
+      PORT: 3000
+      CAMUNDA_OPTIMIZE_BASE_URL: ${CAMUNDA_OPTIMIZE_BASE_URL:-}
+      CAMUNDA_OPTIMIZE_TOKEN: ${CAMUNDA_OPTIMIZE_TOKEN:-}
+      CAMUNDA_OPTIMIZE_COLLECTION_ID: ${CAMUNDA_OPTIMIZE_COLLECTION_ID:-}
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    working_dir: /app
+    command: npx vite --host 0.0.0.0 --port 5173
+    env_file:
+      - ./frontend/.env
+    environment:
+      VITE_API_BASE_URL: http://localhost:3000
+      VITE_DASHBOARD_ID: e601bcb9-b11a-4086-9ae3-88c7b825269c
+      VITE_PROCESS_ID: Process_15wz3ez
+      VITE_PROCESS_INSTANCE_KEY: 2251799813685248
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped

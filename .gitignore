@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# build output
+frontend/dist/
+**/dist/
+
+# environment files
+.env
+**/.env
+.env.*
+**/.env.*
+
+# OS files
+.DS_Store
+**/.DS_Store
+
+# logs
+npm-debug.log*
+
+# editor configs
+.vscode/
