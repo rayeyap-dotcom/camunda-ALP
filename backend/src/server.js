@@ -13,9 +13,14 @@ const COLLECTION_ID = process.env.CAMUNDA_OPTIMIZE_COLLECTION_ID || '';
 const OAUTH_URL = process.env.CAMUNDA_OAUTH_URL || process.env.ZEEBE_AUTHORIZATION_SERVER_URL || 'https://login.cloud.camunda.io/oauth/token';
 const CLIENT_ID = process.env.CAMUNDA_CLIENT_AUTH_CLIENTID || process.env.CAMUNDA_CLIENT_ID || process.env.ZEEBE_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.CAMUNDA_CLIENT_AUTH_CLIENTSECRET || process.env.CAMUNDA_CLIENT_SECRET || process.env.ZEEBE_CLIENT_SECRET || '';
-const TOKEN_AUDIENCE = process.env.CAMUNDA_TOKEN_AUDIENCE || process.env.ZEEBE_TOKEN_AUDIENCE || 'zeebe.camunda.io';
-let cachedOptimizeToken = null;
-let cachedOptimizeTokenExpiry = 0;
+const OPTIMIZE_TOKEN_AUDIENCE = process.env.CAMUNDA_OPTIMIZE_OAUTH_AUDIENCE || 'optimize.camunda.io';
+const ZEEBE_TOKEN_AUDIENCE = process.env.CAMUNDA_TOKEN_AUDIENCE || process.env.ZEEBE_TOKEN_AUDIENCE || 'zeebe.camunda.io';
+const ZEEBE_REST_ADDRESS = (process.env.ZEEBE_REST_ADDRESS || '').replace(/\/$/, '');
+
+// Camunda 8 issues a different token per audience (Optimize vs. the Zeebe/
+// Orchestration Cluster API); a token for one audience is rejected by the
+// other, so each audience needs its own cache entry rather than a single one.
+const tokenCacheByAudience = new Map();
 
 app.use(cors());
 app.use(express.json());
@@ -33,64 +38,68 @@ function buildConfigError(message) {
   };
 }
 
-async function getOptimizeAccessToken() {
-  if (CAMUNDA_TOKEN) {
-    return CAMUNDA_TOKEN;
-  }
-
+async function getAccessToken(audience) {
   if (!CLIENT_ID || !CLIENT_SECRET) {
     return '';
   }
 
   const now = Date.now();
-  if (cachedOptimizeToken && now < cachedOptimizeTokenExpiry) {
-    return cachedOptimizeToken;
+  const cached = tokenCacheByAudience.get(audience);
+  if (cached && now < cached.expiry) {
+    return cached.token;
   }
 
-  const audiences = [TOKEN_AUDIENCE, 'optimize.camunda.io', 'zeebe.camunda.io', 'operate.camunda.io', 'tasklist.camunda.io', 'api.cloud.camunda.io'];
-
-  for (const audience of audiences) {
-    try {
-      const response = await axios.post(
-        OAUTH_URL,
-        new URLSearchParams({
-          grant_type: 'client_credentials',
-          client_id: CLIENT_ID,
-          client_secret: CLIENT_SECRET,
-          audience,
-        }),
-        {
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          timeout: 30000,
-        }
-      );
-
-      const token = response.data && response.data.access_token;
-      if (token) {
-        cachedOptimizeToken = token;
-        cachedOptimizeTokenExpiry = now + ((response.data.expires_in || 300) * 1000) - 60000;
-        return token;
-      }
-    } catch (error) {
-      // Try the next audience if this one is rejected.
+  const response = await axios.post(
+    OAUTH_URL,
+    new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      audience,
+    }),
+    {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      timeout: 30000,
     }
+  );
+
+  const token = response.data && response.data.access_token;
+  if (!token) {
+    return '';
   }
 
-  return '';
+  tokenCacheByAudience.set(audience, {
+    token,
+    expiry: now + ((response.data.expires_in || 300) * 1000) - 60000,
+  });
+  return token;
 }
 
 async function getOptimizeHeaders() {
-  const token = await getOptimizeAccessToken();
+  const token = CAMUNDA_TOKEN || (await getAccessToken(OPTIMIZE_TOKEN_AUDIENCE));
   return {
     Accept: 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
 }
 
+async function getZeebeHeaders() {
+  const token = await getAccessToken(ZEEBE_TOKEN_AUDIENCE);
+  return {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
 function ensureOptimizeConfigured() {
   return Boolean(CAMUNDA_BASE_URL && (CAMUNDA_TOKEN || (CLIENT_ID && CLIENT_SECRET)));
+}
+
+function ensureZeebeConfigured() {
+  return Boolean(ZEEBE_REST_ADDRESS && CLIENT_ID && CLIENT_SECRET);
 }
 
 function emptyDashboardState(dashboardId) {
@@ -206,9 +215,11 @@ app.get('/api/test', (req, res) => {
   res.json({
     ok: true,
     message: 'Camunda API server is running',
-    configured: Boolean(CAMUNDA_BASE_URL && CAMUNDA_TOKEN),
+    optimizeConfigured: ensureOptimizeConfigured(),
+    zeebeConfigured: ensureZeebeConfigured(),
     collectionId: COLLECTION_ID,
-    baseUrl: CAMUNDA_BASE_URL || 'not-configured',
+    optimizeBaseUrl: CAMUNDA_BASE_URL || 'not-configured',
+    zeebeRestAddress: ZEEBE_REST_ADDRESS || 'not-configured',
   });
 });
 
@@ -236,33 +247,62 @@ app.get('/api/dashboard/:dashboardId/reports', async (req, res) => {
   }
 });
 
+function mapProcessInstanceState(state) {
+  const stateMap = { running: 'ACTIVE', completed: 'COMPLETED', cancelled: 'CANCELED' };
+  return stateMap[state];
+}
+
+async function fetchUserTaskVariables(userTaskKey, headers) {
+  try {
+    const response = await axios.post(
+      `${ZEEBE_REST_ADDRESS}/v2/user-tasks/${userTaskKey}/variables/search`,
+      { page: { limit: 50 } },
+      { headers, timeout: 20000 }
+    );
+
+    const items = response.data.items || [];
+    return Object.fromEntries(
+      items.map((item) => {
+        try {
+          return [item.name, JSON.parse(item.value)];
+        } catch {
+          return [item.name, item.value];
+        }
+      })
+    );
+  } catch {
+    return {};
+  }
+}
+
 app.get('/api/process-instances', async (req, res) => {
   try {
-    const processDefinitionKey = req.query.processDefinitionKey || req.query.processId || 'Process_1dwlliq';
+    const processDefinitionId = req.query.processDefinitionKey || req.query.processId || '';
     const processInstanceKey = req.query.processInstanceKey || req.query.processKey || '';
     const state = req.query.state || 'all';
 
-    if (!ensureOptimizeConfigured()) {
+    if (!ensureZeebeConfigured()) {
       return res.json([]);
     }
 
-    const response = await axios.get(`${CAMUNDA_BASE_URL}/engine-rest/process-instance`, {
-      params: processInstanceKey ? { processInstanceKey } : {},
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${CAMUNDA_TOKEN}`,
-      },
-      timeout: 20000,
-    });
+    const filter = {};
+    if (processDefinitionId) filter.processDefinitionId = processDefinitionId;
+    if (processInstanceKey) filter.processInstanceKey = processInstanceKey;
+    const mappedState = mapProcessInstanceState(state);
+    if (mappedState) filter.state = mappedState;
 
-    const instances = Array.isArray(response.data) ? response.data : response.data?.items || [];
-    const filtered = instances.filter((instance) => {
-      const matchesKey = !processDefinitionKey || !instance.processDefinitionKey || instance.processDefinitionKey === processDefinitionKey;
-      const matchesState = state === 'all' || String(instance.state || '').toLowerCase() === String(state).toLowerCase();
-      return matchesKey && matchesState;
-    });
+    const response = await axios.post(
+      `${ZEEBE_REST_ADDRESS}/v2/process-instances/search`,
+      { filter, page: { limit: 200 } },
+      { headers: await getZeebeHeaders(), timeout: 20000 }
+    );
 
-    res.json(filtered);
+    let instances = response.data.items || [];
+    if (state === 'failed') {
+      instances = instances.filter((instance) => instance.hasIncident);
+    }
+
+    res.json(instances);
   } catch (error) {
     res.status(500).json({ ok: false, message: 'Unable to fetch process instances', error: error.message });
   }
@@ -270,28 +310,38 @@ app.get('/api/process-instances', async (req, res) => {
 
 app.get('/api/tasklist', async (req, res) => {
   try {
-    const processDefinitionKey = req.query.processDefinitionKey || req.query.processId || 'Process_1dwlliq';
+    const processDefinitionId = req.query.processDefinitionKey || req.query.processId || '';
     const processInstanceKey = req.query.processInstanceKey || req.query.processKey || '';
 
-    if (!ensureOptimizeConfigured()) {
+    if (!ensureZeebeConfigured()) {
       return res.json([]);
     }
 
-    const response = await axios.get(`${CAMUNDA_BASE_URL}/engine-rest/task`, {
-      params: processInstanceKey ? { processInstanceKey } : {},
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${CAMUNDA_TOKEN}`,
-      },
-      timeout: 20000,
-    });
+    const headers = await getZeebeHeaders();
+    const filter = { state: 'CREATED' };
+    if (processDefinitionId) filter.processDefinitionId = processDefinitionId;
+    if (processInstanceKey) filter.processInstanceKey = processInstanceKey;
 
-    const tasks = Array.isArray(response.data) ? response.data : response.data?.items || [];
-    const filtered = !processDefinitionKey
-      ? tasks
-      : tasks.filter((task) => !task.processDefinitionKey || task.processDefinitionKey === processDefinitionKey);
+    const response = await axios.post(
+      `${ZEEBE_REST_ADDRESS}/v2/user-tasks/search`,
+      { filter, page: { limit: 100 } },
+      { headers, timeout: 20000 }
+    );
 
-    res.json(filtered);
+    const items = response.data.items || [];
+    const tasks = await Promise.all(
+      items.map(async (task) => ({
+        id: task.userTaskKey,
+        name: task.name || task.elementId,
+        assignee: task.assignee,
+        status: task.state,
+        processInstanceKey: task.processInstanceKey,
+        processDefinitionKey: task.processDefinitionId,
+        variables: await fetchUserTaskVariables(task.userTaskKey, headers),
+      }))
+    );
+
+    res.json(tasks);
   } catch (error) {
     res.status(500).json({ ok: false, message: 'Unable to fetch tasklist', error: error.message });
   }
@@ -302,18 +352,15 @@ app.post('/api/tasks/:taskId/completion', async (req, res) => {
     const { taskId } = req.params;
     const variables = req.body?.variables || {};
 
-    if (!ensureOptimizeConfigured()) {
-      return res.status(503).json({ ok: false, message: 'Camunda Optimize is not configured; task completion is unavailable.' });
+    if (!ensureZeebeConfigured()) {
+      return res.status(503).json({ ok: false, message: 'Camunda orchestration cluster is not configured; task completion is unavailable.' });
     }
 
-    const token = await getOptimizeAccessToken();
-    await axios.post(`${CAMUNDA_BASE_URL}/engine-rest/task/${taskId}/complete`, { variables }, {
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      timeout: 20000,
-    });
+    await axios.post(
+      `${ZEEBE_REST_ADDRESS}/v2/user-tasks/${taskId}/completion`,
+      { variables },
+      { headers: await getZeebeHeaders(), timeout: 20000 }
+    );
 
     res.json({
       ok: true,
