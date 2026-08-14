@@ -40,6 +40,21 @@ jobs:
           AR_HOST: ${{ env.AR_HOST }}
         run: gcloud auth configure-docker "$AR_HOST" --quiet
 
+      - name: Ensure Artifact Registry repo exists
+        env:
+          REGION: ${{ vars.GCP_REGION }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          ARTIFACT_REPO: ${{ vars.ARTIFACT_REPO }}
+        run: |
+          set -euo pipefail
+          gcloud artifacts repositories describe "$ARTIFACT_REPO" \
+            --location "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1 || \
+          gcloud artifacts repositories create "$ARTIFACT_REPO" \
+            --repository-format=docker \
+            --location "$REGION" \
+            --project "$PROJECT_ID" \
+            --description="Camunda Application Lifecycle images"
+
       - name: Compute image ref
         id: ref
         env:
@@ -49,7 +64,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          IMAGE="${AR_HOST}/${PROJECT_ID}/${ARTIFACT_REPO}/camunda-alp-frontend"
+          IMAGE="${AR_HOST}/${PROJECT_ID}/${ARTIFACT_REPO}/frontend"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           echo "tagged=${IMAGE}:${SHA}" >> "$GITHUB_OUTPUT"
 
@@ -94,8 +109,8 @@ jobs:
           tags: |
             ${{ steps.ref.outputs.tagged }}
             ${{ steps.ref.outputs.image }}:latest
-          cache-from: type=gha,scope=camunda-alp-frontend
-          cache-to: type=gha,scope=camunda-alp-frontend,mode=max
+          cache-from: type=gha,scope=camunda-compliance-review-frontend
+          cache-to: type=gha,scope=camunda-compliance-review-frontend,mode=max
 
       - name: Deploy frontend
         id: deploy

@@ -40,6 +40,21 @@ jobs:
           AR_HOST: ${{ env.AR_HOST }}
         run: gcloud auth configure-docker "$AR_HOST" --quiet
 
+      - name: Ensure Artifact Registry repo exists
+        env:
+          REGION: ${{ vars.GCP_REGION }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          ARTIFACT_REPO: ${{ vars.ARTIFACT_REPO }}
+        run: |
+          set -euo pipefail
+          gcloud artifacts repositories describe "$ARTIFACT_REPO" \
+            --location "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1 || \
+          gcloud artifacts repositories create "$ARTIFACT_REPO" \
+            --repository-format=docker \
+            --location "$REGION" \
+            --project "$PROJECT_ID" \
+            --description="Camunda Application Lifecycle images"
+
       - name: Compute image ref
         id: ref
         env:
@@ -49,9 +64,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Distinct image name from the NUHS project's "backend" image, since
-          # both projects currently share the same Artifact Registry repo.
-          IMAGE="${AR_HOST}/${PROJECT_ID}/${ARTIFACT_REPO}/camunda-alp-backend"
+          IMAGE="${AR_HOST}/${PROJECT_ID}/${ARTIFACT_REPO}/backend"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           echo "tagged=${IMAGE}:${SHA}" >> "$GITHUB_OUTPUT"
 
@@ -66,8 +79,8 @@ jobs:
           tags: |
             ${{ steps.ref.outputs.tagged }}
             ${{ steps.ref.outputs.image }}:latest
-          cache-from: type=gha,scope=camunda-alp-backend
-          cache-to: type=gha,scope=camunda-alp-backend,mode=max
+          cache-from: type=gha,scope=camunda-compliance-review-backend
+          cache-to: type=gha,scope=camunda-compliance-review-backend,mode=max
 
       - name: Deploy backend
         id: deploy
