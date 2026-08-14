@@ -79,8 +79,8 @@ jobs:
           tags: |
             ${{ steps.ref.outputs.tagged }}
             ${{ steps.ref.outputs.image }}:latest
-          cache-from: type=gha,scope=camunda-compliance-review-backend
-          cache-to: type=gha,scope=camunda-compliance-review-backend,mode=max
+          cache-from: type=gha,scope=camunda-alp-backend
+          cache-to: type=gha,scope=camunda-alp-backend,mode=max
 
       - name: Deploy backend
         id: deploy
