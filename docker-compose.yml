@@ -9,9 +9,6 @@ services:
       - ./backend/.env
     environment:
       PORT: 3000
-      CAMUNDA_OPTIMIZE_BASE_URL: ${CAMUNDA_OPTIMIZE_BASE_URL:-}
-      CAMUNDA_OPTIMIZE_TOKEN: ${CAMUNDA_OPTIMIZE_TOKEN:-}
-      CAMUNDA_OPTIMIZE_COLLECTION_ID: ${CAMUNDA_OPTIMIZE_COLLECTION_ID:-}
     volumes:
       - ./backend:/app
       - /app/node_modules

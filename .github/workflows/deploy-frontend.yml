@@ -1,0 +1,137 @@
+name: Deploy frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-frontend
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AR_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure docker for Artifact Registry
+        env:
+          AR_HOST: ${{ env.AR_HOST }}
+        run: gcloud auth configure-docker "$AR_HOST" --quiet
+
+      - name: Compute image ref
+        id: ref
+        env:
+          AR_HOST: ${{ env.AR_HOST }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          ARTIFACT_REPO: ${{ vars.ARTIFACT_REPO }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          IMAGE="${AR_HOST}/${PROJECT_ID}/${ARTIFACT_REPO}/camunda-alp-frontend"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tagged=${IMAGE}:${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # VITE_API_BASE_URL is baked into the JS bundle at build time (Vite env
+      # vars aren't runtime-configurable), so the backend must already be
+      # deployed before the first frontend deploy. The backend's own CORS is
+      # wide open (cors() with no origin allow-list), so unlike NUHS there's
+      # no dual-URL / origin-sync dance needed here.
+      - name: Look up backend URL
+        id: backend-url
+        env:
+          SERVICE: ${{ vars.BACKEND_SERVICE }}
+          REGION: ${{ vars.GCP_REGION }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          URL="$(gcloud run services describe "$SERVICE" \
+            --region "$REGION" --project "$PROJECT_ID" \
+            --format='value(status.url)' 2>/dev/null || true)"
+          if [[ -z "$URL" ]]; then
+            echo "Backend Cloud Run service '$SERVICE' not found in $REGION." >&2
+            echo "Deploy the backend first: Actions -> Deploy backend -> Run workflow." >&2
+            exit 1
+          fi
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "Backend URL: ${URL}"
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          build-args: |
+            VITE_API_BASE_URL=${{ steps.backend-url.outputs.url }}
+            VITE_DASHBOARD_ID=${{ vars.VITE_DASHBOARD_ID }}
+            VITE_COLLECTION_ID=${{ vars.VITE_COLLECTION_ID }}
+            VITE_PROCESS_ID=${{ vars.VITE_PROCESS_ID }}
+            VITE_PROCESS_INSTANCE_KEY=${{ vars.VITE_PROCESS_INSTANCE_KEY }}
+          tags: |
+            ${{ steps.ref.outputs.tagged }}
+            ${{ steps.ref.outputs.image }}:latest
+          cache-from: type=gha,scope=camunda-alp-frontend
+          cache-to: type=gha,scope=camunda-alp-frontend,mode=max
+
+      - name: Deploy frontend
+        id: deploy
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          SERVICE: ${{ vars.FRONTEND_SERVICE }}
+          IMAGE: ${{ steps.ref.outputs.tagged }}
+        run: |
+          set -euo pipefail
+          gcloud run deploy "$SERVICE" \
+            --image "$IMAGE" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --memory 256Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 4
+
+          URL="$(gcloud run services describe "$SERVICE" \
+            --region "$REGION" --project "$PROJECT_ID" --format='value(status.url)')"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          FRONTEND_URL: ${{ steps.deploy.outputs.url }}
+          BACKEND_URL: ${{ steps.backend-url.outputs.url }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "### Frontend deployed"
+            echo
+            echo "- URL: $FRONTEND_URL"
+            echo "- Calls backend at: $BACKEND_URL"
+            echo "- Image tag: $SHA"
+          } >> "$GITHUB_STEP_SUMMARY"

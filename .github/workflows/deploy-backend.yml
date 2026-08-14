@@ -1,0 +1,123 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AR_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure docker for Artifact Registry
+        env:
+          AR_HOST: ${{ env.AR_HOST }}
+        run: gcloud auth configure-docker "$AR_HOST" --quiet
+
+      - name: Compute image ref
+        id: ref
+        env:
+          AR_HOST: ${{ env.AR_HOST }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          ARTIFACT_REPO: ${{ vars.ARTIFACT_REPO }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Distinct image name from the NUHS project's "backend" image, since
+          # both projects currently share the same Artifact Registry repo.
+          IMAGE="${AR_HOST}/${PROJECT_ID}/${ARTIFACT_REPO}/camunda-alp-backend"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tagged=${IMAGE}:${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ${{ steps.ref.outputs.tagged }}
+            ${{ steps.ref.outputs.image }}:latest
+          cache-from: type=gha,scope=camunda-alp-backend
+          cache-to: type=gha,scope=camunda-alp-backend,mode=max
+
+      - name: Deploy backend
+        id: deploy
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          SERVICE: ${{ vars.BACKEND_SERVICE }}
+          IMAGE: ${{ steps.ref.outputs.tagged }}
+          # Non-secret config — server.js accepts several aliases per value
+          # (CAMUNDA_* and ZEEBE_* both point at the same Camunda API client).
+          CAMUNDA_CLIENT_ID: ${{ vars.CAMUNDA_CLIENT_ID }}
+          CAMUNDA_OAUTH_URL: ${{ vars.CAMUNDA_OAUTH_URL }}
+          CAMUNDA_TOKEN_AUDIENCE: ${{ vars.CAMUNDA_TOKEN_AUDIENCE }}
+          CAMUNDA_OPTIMIZE_BASE_URL: ${{ vars.CAMUNDA_OPTIMIZE_BASE_URL }}
+          CAMUNDA_OPTIMIZE_COLLECTION_ID: ${{ vars.CAMUNDA_OPTIMIZE_COLLECTION_ID }}
+          ZEEBE_REST_ADDRESS: ${{ vars.ZEEBE_REST_ADDRESS }}
+          # Secrets
+          CAMUNDA_CLIENT_SECRET: ${{ secrets.CAMUNDA_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          gcloud run deploy "$SERVICE" \
+            --image "$IMAGE" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --memory 512Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 4 \
+            --set-env-vars "CAMUNDA_CLIENT_ID=${CAMUNDA_CLIENT_ID},ZEEBE_CLIENT_ID=${CAMUNDA_CLIENT_ID},CAMUNDA_CLIENT_AUTH_CLIENTID=${CAMUNDA_CLIENT_ID}" \
+            --set-env-vars "CAMUNDA_CLIENT_SECRET=${CAMUNDA_CLIENT_SECRET},ZEEBE_CLIENT_SECRET=${CAMUNDA_CLIENT_SECRET},CAMUNDA_CLIENT_AUTH_CLIENTSECRET=${CAMUNDA_CLIENT_SECRET}" \
+            --set-env-vars "CAMUNDA_OAUTH_URL=${CAMUNDA_OAUTH_URL},ZEEBE_AUTHORIZATION_SERVER_URL=${CAMUNDA_OAUTH_URL}" \
+            --set-env-vars "CAMUNDA_TOKEN_AUDIENCE=${CAMUNDA_TOKEN_AUDIENCE},ZEEBE_TOKEN_AUDIENCE=${CAMUNDA_TOKEN_AUDIENCE}" \
+            --set-env-vars "CAMUNDA_OPTIMIZE_BASE_URL=${CAMUNDA_OPTIMIZE_BASE_URL},CAMUNDA_OPTIMIZE_COLLECTION_ID=${CAMUNDA_OPTIMIZE_COLLECTION_ID}" \
+            --set-env-vars "ZEEBE_REST_ADDRESS=${ZEEBE_REST_ADDRESS}"
+
+          URL="$(gcloud run services describe "$SERVICE" \
+            --region "$REGION" --project "$PROJECT_ID" --format='value(status.url)')"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          BACKEND_URL: ${{ steps.deploy.outputs.url }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "### Backend deployed"
+            echo
+            echo "- URL: $BACKEND_URL"
+            echo "- Image tag: $SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
