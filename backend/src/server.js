@@ -1,3 +1,4 @@
+// Camunda Optimize/Zeebe proxy — deployed via GitHub Actions on push to main.
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
