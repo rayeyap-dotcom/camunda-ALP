@@ -31,13 +31,3 @@ jobs:
               "${REGION}-docker.pkg.dev/${PROJECT_ID}/nuhs-poc/${img}" \
               --delete-tags --quiet || echo "  (not found or already gone, skipping)"
           done
-
-      - name: Delete the unused camunda-compliance-review repo
-        env:
-          REGION: ${{ vars.GCP_REGION }}
-          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-        run: |
-          set -euo pipefail
-          gcloud artifacts repositories delete camunda-compliance-review \
-            --location "$REGION" --project "$PROJECT_ID" --quiet || \
-            echo "  (not found or already gone, skipping)"
