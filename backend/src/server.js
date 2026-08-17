@@ -23,6 +23,14 @@ const ZEEBE_REST_ADDRESS = (process.env.ZEEBE_REST_ADDRESS || '').replace(/\/$/,
 // other, so each audience needs its own cache entry rather than a single one.
 const tokenCacheByAudience = new Map();
 
+// Dev-only diagnostic logging — set DEBUG_LOGS=false to silence. Never logs
+// secret values, only whether they're present, plus request/response shape.
+const DEBUG_LOGS = process.env.DEBUG_LOGS !== 'false';
+function logDebug(scope, data) {
+  if (!DEBUG_LOGS) return;
+  console.log(`[debug ${new Date().toISOString()}] ${scope}`, JSON.stringify(data));
+}
+
 app.use(cors());
 app.use(express.json());
 
@@ -41,35 +49,60 @@ function buildConfigError(message) {
 
 async function getAccessToken(audience) {
   if (!CLIENT_ID || !CLIENT_SECRET) {
+    logDebug('getAccessToken: missing credentials, returning empty token', {
+      audience,
+      hasClientId: Boolean(CLIENT_ID),
+      hasClientSecret: Boolean(CLIENT_SECRET),
+    });
     return '';
   }
 
   const now = Date.now();
   const cached = tokenCacheByAudience.get(audience);
   if (cached && now < cached.expiry) {
+    logDebug('getAccessToken: cache hit', { audience, expiresInMs: cached.expiry - now });
     return cached.token;
   }
 
-  const response = await axios.post(
-    OAUTH_URL,
-    new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
+  logDebug('getAccessToken: fetching new token', { audience, oauthUrl: OAUTH_URL });
+
+  let response;
+  try {
+    response = await axios.post(
+      OAUTH_URL,
+      new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        audience,
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        timeout: 30000,
+      }
+    );
+  } catch (error) {
+    logDebug('getAccessToken: OAuth request failed', {
       audience,
-    }),
-    {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      timeout: 30000,
-    }
-  );
+      status: error.response && error.response.status,
+      data: error.response && error.response.data,
+      message: error.message,
+    });
+    throw error;
+  }
 
   const token = response.data && response.data.access_token;
   if (!token) {
+    logDebug('getAccessToken: OAuth response had no access_token', {
+      audience,
+      responseKeys: Object.keys(response.data || {}),
+    });
     return '';
   }
+
+  logDebug('getAccessToken: token acquired', { audience, expiresIn: response.data.expires_in });
 
   tokenCacheByAudience.set(audience, {
     token,
@@ -96,11 +129,28 @@ async function getZeebeHeaders() {
 }
 
 function ensureOptimizeConfigured() {
-  return Boolean(CAMUNDA_BASE_URL && (CAMUNDA_TOKEN || (CLIENT_ID && CLIENT_SECRET)));
+  const configured = Boolean(CAMUNDA_BASE_URL && (CAMUNDA_TOKEN || (CLIENT_ID && CLIENT_SECRET)));
+  if (!configured) {
+    logDebug('ensureOptimizeConfigured: false', {
+      hasBaseUrl: Boolean(CAMUNDA_BASE_URL),
+      hasToken: Boolean(CAMUNDA_TOKEN),
+      hasClientId: Boolean(CLIENT_ID),
+      hasClientSecret: Boolean(CLIENT_SECRET),
+    });
+  }
+  return configured;
 }
 
 function ensureZeebeConfigured() {
-  return Boolean(ZEEBE_REST_ADDRESS && CLIENT_ID && CLIENT_SECRET);
+  const configured = Boolean(ZEEBE_REST_ADDRESS && CLIENT_ID && CLIENT_SECRET);
+  if (!configured) {
+    logDebug('ensureZeebeConfigured: false', {
+      hasZeebeRestAddress: Boolean(ZEEBE_REST_ADDRESS),
+      hasClientId: Boolean(CLIENT_ID),
+      hasClientSecret: Boolean(CLIENT_SECRET),
+    });
+  }
+  return configured;
 }
 
 function emptyDashboardState(dashboardId) {
@@ -343,7 +393,10 @@ app.get('/api/process-instances', async (req, res) => {
     const processInstanceKey = req.query.processInstanceKey || req.query.processKey || '';
     const state = req.query.state || 'all';
 
+    logDebug('GET /api/process-instances: incoming', { query: req.query });
+
     if (!ensureZeebeConfigured()) {
+      logDebug('GET /api/process-instances: Zeebe not configured, returning [] without calling upstream', {});
       return res.json([]);
     }
 
@@ -353,6 +406,11 @@ app.get('/api/process-instances', async (req, res) => {
     const mappedState = mapProcessInstanceState(state);
     if (mappedState) filter.state = mappedState;
 
+    logDebug('GET /api/process-instances: calling Zeebe', {
+      url: `${ZEEBE_REST_ADDRESS}/v2/process-instances/search`,
+      filter,
+    });
+
     const response = await axios.post(
       `${ZEEBE_REST_ADDRESS}/v2/process-instances/search`,
       { filter, page: { limit: 200 } },
@@ -360,12 +418,21 @@ app.get('/api/process-instances', async (req, res) => {
     );
 
     let instances = response.data.items || [];
+    logDebug('GET /api/process-instances: Zeebe response', {
+      status: response.status,
+      itemCount: instances.length,
+    });
     if (state === 'failed') {
       instances = instances.filter((instance) => instance.hasIncident);
     }
 
     res.json(instances);
   } catch (error) {
+    logDebug('GET /api/process-instances: failed', {
+      status: error.response && error.response.status,
+      data: error.response && error.response.data,
+      message: error.message,
+    });
     res.status(500).json({ ok: false, message: 'Unable to fetch process instances', error: error.message });
   }
 });
@@ -375,7 +442,10 @@ app.get('/api/tasklist', async (req, res) => {
     const processDefinitionId = req.query.processDefinitionKey || req.query.processId || '';
     const processInstanceKey = req.query.processInstanceKey || req.query.processKey || '';
 
+    logDebug('GET /api/tasklist: incoming', { query: req.query });
+
     if (!ensureZeebeConfigured()) {
+      logDebug('GET /api/tasklist: Zeebe not configured, returning [] without calling upstream', {});
       return res.json([]);
     }
 
@@ -384,6 +454,12 @@ app.get('/api/tasklist', async (req, res) => {
     if (processDefinitionId) filter.processDefinitionId = processDefinitionId;
     if (processInstanceKey) filter.processInstanceKey = processInstanceKey;
 
+    logDebug('GET /api/tasklist: calling Zeebe', {
+      url: `${ZEEBE_REST_ADDRESS}/v2/user-tasks/search`,
+      filter,
+      hasAuthHeader: Boolean(headers.Authorization),
+    });
+
     const response = await axios.post(
       `${ZEEBE_REST_ADDRESS}/v2/user-tasks/search`,
       { filter, page: { limit: 100 } },
@@ -391,6 +467,17 @@ app.get('/api/tasklist', async (req, res) => {
     );
 
     const items = response.data.items || [];
+    logDebug('GET /api/tasklist: Zeebe response', {
+      status: response.status,
+      itemCount: items.length,
+      // If items is empty but the filter has no processInstanceKey/processDefinitionId,
+      // this means Zeebe genuinely has zero user tasks in state=CREATED right now —
+      // not a bug in this endpoint. If itemCount is unexpectedly 0 with a filter set,
+      // double-check the filter values above are what you expect (e.g. a stale/wrong
+      // processInstanceKey), or that tasks haven't already been claimed/completed.
+      filterUsed: filter,
+    });
+
     const tasks = await Promise.all(
       items.map(async (task) => ({
         id: task.userTaskKey,
@@ -405,6 +492,11 @@ app.get('/api/tasklist', async (req, res) => {
 
     res.json(tasks);
   } catch (error) {
+    logDebug('GET /api/tasklist: failed', {
+      status: error.response && error.response.status,
+      data: error.response && error.response.data,
+      message: error.message,
+    });
     res.status(500).json({ ok: false, message: 'Unable to fetch tasklist', error: error.message });
   }
 });
