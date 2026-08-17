@@ -11,6 +11,9 @@ frontend/dist/
 **/.env
 .env.*
 **/.env.*
+# ...except templates, which are meant to be committed (no real values)
+!.env.example
+!**/.env.example
 
 # OS files
 .DS_Store

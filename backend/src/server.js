@@ -3,8 +3,32 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const dotenv = require('dotenv');
+const fs = require('fs');
+const path = require('path');
 
-dotenv.config();
+// Dev-only diagnostic logging — set DEBUG_LOGS=false to silence. Never logs
+// secret values, only whether they're present, plus request/response shape.
+const DEBUG_LOGS = process.env.DEBUG_LOGS !== 'false';
+function logDebug(scope, data) {
+  if (!DEBUG_LOGS) return;
+  console.log(`[debug ${new Date().toISOString()}] ${scope}`, JSON.stringify(data));
+}
+
+// dotenv.config() loads .env relative to process.cwd() (the directory the
+// command was RUN from), not relative to this file. Running `node
+// src/server.js` from the repo root instead of from backend/ is a common way
+// to end up with every env var silently empty even if backend/.env exists
+// and is filled in correctly — log exactly what dotenv found so that's
+// provable instead of guessed.
+const expectedEnvPath = path.resolve(process.cwd(), '.env');
+const dotenvResult = dotenv.config();
+logDebug('dotenv.config() startup', {
+  cwd: process.cwd(),
+  expectedEnvPath,
+  envFileExistsAtCwd: fs.existsSync(expectedEnvPath),
+  dotenvError: dotenvResult.error ? dotenvResult.error.message : null,
+  keysLoaded: dotenvResult.parsed ? Object.keys(dotenvResult.parsed).length : 0,
+});
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -22,14 +46,6 @@ const ZEEBE_REST_ADDRESS = (process.env.ZEEBE_REST_ADDRESS || '').replace(/\/$/,
 // Orchestration Cluster API); a token for one audience is rejected by the
 // other, so each audience needs its own cache entry rather than a single one.
 const tokenCacheByAudience = new Map();
-
-// Dev-only diagnostic logging — set DEBUG_LOGS=false to silence. Never logs
-// secret values, only whether they're present, plus request/response shape.
-const DEBUG_LOGS = process.env.DEBUG_LOGS !== 'false';
-function logDebug(scope, data) {
-  if (!DEBUG_LOGS) return;
-  console.log(`[debug ${new Date().toISOString()}] ${scope}`, JSON.stringify(data));
-}
 
 app.use(cors());
 app.use(express.json());
