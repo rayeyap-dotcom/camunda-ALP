@@ -17,6 +17,10 @@ permissions:
 
 jobs:
   deploy:
+    # Only the org repo deploys. Personal forks (e.g. used for intern review
+    # before syncing back here) get this workflow file too, but should never
+    # run it — they have no GCP credentials and shouldn't deploy anyway.
+    if: github.repository == 'PebbleRoad/camunda-application-lifecycle'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
