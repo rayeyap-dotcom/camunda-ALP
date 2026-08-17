@@ -46,3 +46,36 @@ test('GET /api/collection/:id/dashboards returns an array', async () => {
   assert.equal(response.status, 200);
   assert.ok(Array.isArray(response.data));
 });
+
+test('POST /api/tasks/:taskId/assignment fails gracefully for invalid or unavailable upstream assignment requests', async () => {
+  await new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: 'localhost',
+      port: PORT,
+      path: '/api/tasks/test-task/assignment',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    }, (res) => {
+      let raw = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => raw += chunk);
+      res.on('end', () => {
+        try {
+          const data = raw ? JSON.parse(raw) : null;
+          assert.equal(data.ok, false);
+          assert.ok([503, 500].includes(res.statusCode));
+          assert.match(String(data.message || ''), /configured|unavailable|Unable to reassign task|reassign/i);
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(JSON.stringify({ assignee: 'demo-user' }));
+    req.end();
+  });
+});

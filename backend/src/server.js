@@ -544,6 +544,33 @@ app.post('/api/tasks/:taskId/completion', async (req, res) => {
   }
 });
 
+app.post('/api/tasks/:taskId/assignment', async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const assignee = req.body?.assignee ?? '';
+
+    if (!ensureZeebeConfigured()) {
+      return res.status(503).json({ ok: false, message: 'Camunda orchestration cluster is not configured; task reassignment is unavailable.' });
+    }
+
+    await axios.post(
+      `${ZEEBE_REST_ADDRESS}/v2/user-tasks/${taskId}/assignment`,
+      { assignee },
+      { headers: await getZeebeHeaders(), timeout: 20000 }
+    );
+
+    res.json({
+      ok: true,
+      taskId,
+      assignee,
+      submitted: true,
+      message: 'Task assignment accepted',
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, message: 'Unable to reassign task', error: error.message });
+  }
+});
+
 app.get('/api/report/:reportId/data', async (req, res) => {
   try {
     const { reportId } = req.params;
