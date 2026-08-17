@@ -21,6 +21,7 @@ frontend/dist/
 
 # logs
 npm-debug.log*
+.backend-dev.log
 
 # editor configs
 .vscode/
