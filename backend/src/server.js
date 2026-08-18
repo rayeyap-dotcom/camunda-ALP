@@ -453,18 +453,29 @@ app.get('/api/process-instances/:instanceKey/variables', async (req, res) => {
 
     logDebug('GET /api/process-instances/:instanceKey/variables: incoming request', {
       instanceKey,
+      zeebeRestAddress: ZEEBE_REST_ADDRESS || 'NOT_CONFIGURED',
       operateBaseUrl: operateBaseUrl || 'NOT_CONFIGURED',
     });
 
-    if (!operateBaseUrl) {
-      logDebug('GET /api/process-instances/:instanceKey/variables: operate base url not configured', {});
-      return res.status(404).json({ ok: false, message: 'Camunda Operate base URL is not configured.' });
+    if (!ZEEBE_REST_ADDRESS && !operateBaseUrl) {
+      logDebug('GET /api/process-instances/:instanceKey/variables: neither zeebe rest address nor operate base url configured', {});
+      return res.status(404).json({ ok: false, message: 'Camunda variables search is not configured.' });
     }
 
+    // On Camunda 8 SaaS, Operate has been merged into the unified Orchestration
+    // Cluster REST API served off ZEEBE_REST_ADDRESS — /v2/variables/search there
+    // is the one that actually works. The legacy standalone /operate/v1|v2 paths
+    // 405 on that gateway; they're kept as fallbacks for self-managed setups that
+    // still expose a separate Operate REST API.
     const candidateUrls = [
-      `${operateBaseUrl}/v1/variables/search`,
-      `${operateBaseUrl}/v2/variables/search`,
-      `${operateBaseUrl}/v1/process-instances/${instanceKey}/variables/search`,
+      ...(ZEEBE_REST_ADDRESS ? [`${ZEEBE_REST_ADDRESS}/v2/variables/search`] : []),
+      ...(operateBaseUrl
+        ? [
+            `${operateBaseUrl}/v1/variables/search`,
+            `${operateBaseUrl}/v2/variables/search`,
+            `${operateBaseUrl}/v1/process-instances/${instanceKey}/variables/search`,
+          ]
+        : []),
     ];
 
     let lastError = null;

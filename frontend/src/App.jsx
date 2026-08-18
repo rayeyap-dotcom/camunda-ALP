@@ -156,7 +156,7 @@ function parseVariableValue(rawValue) {
     const duration = 'duration' in rawValue ? rawValue.duration : ('elapsedTime' in rawValue ? rawValue.elapsedTime : '')
     const status = rawValue.status || rawValue.state || (rawValue.failed ? 'Failed' : 'Passed')
     return {
-      value: typeof value === 'object' ? JSON.stringify(value) : value,
+      value,
       duration,
       status: String(status).toLowerCase() === 'failed' ? 'Failed' : 'Passed',
     }
@@ -188,6 +188,74 @@ function formatVariableDisplay(value) {
   }
 }
 
+function describeVariableType(value) {
+  if (value === null || value === undefined) return 'empty'
+  if (Array.isArray(value)) return `array · ${value.length}`
+  if (typeof value === 'object') return `object · ${Object.keys(value).length}`
+  return typeof value
+}
+
+function previewVariableValue(value) {
+  if (value === null || value === undefined) return '—'
+  if (Array.isArray(value)) return value.length ? `${value.length} item${value.length === 1 ? '' : 's'}` : 'empty array'
+  if (typeof value === 'object') {
+    const keys = Object.keys(value)
+    return keys.length ? keys.slice(0, 4).join(', ') + (keys.length > 4 ? ', …' : '') : 'empty object'
+  }
+  const text = String(value)
+  return text.length > 140 ? `${text.slice(0, 140)}…` : text
+}
+
+const VARIABLE_TREE_MAX_DEPTH = 5
+
+function VariableTree({ value, depth = 0 }) {
+  if (value === null || value === undefined || value === '') {
+    return <span className="var-empty">—</span>
+  }
+
+  if (depth > VARIABLE_TREE_MAX_DEPTH) {
+    return <span className="var-empty">{previewVariableValue(value)} (nested too deep to expand)</span>
+  }
+
+  if (Array.isArray(value)) {
+    if (!value.length) return <span className="var-empty">Empty list</span>
+    return (
+      <ol className="var-list">
+        {value.map((item, index) => (
+          <li key={index} className="var-list-item">
+            <VariableTree value={item} depth={depth + 1} />
+          </li>
+        ))}
+      </ol>
+    )
+  }
+
+  if (typeof value === 'object') {
+    const keys = Object.keys(value)
+    if (!keys.length) return <span className="var-empty">Empty object</span>
+    return (
+      <dl className="var-fields">
+        {keys.map((key) => (
+          <div className="var-field" key={key}>
+            <dt className="var-field-key">{key}</dt>
+            <dd className="var-field-value"><VariableTree value={value[key]} depth={depth + 1} /></dd>
+          </div>
+        ))}
+      </dl>
+    )
+  }
+
+  if (typeof value === 'boolean') {
+    return <span className="var-scalar">{value ? 'true' : 'false'}</span>
+  }
+
+  const text = String(value)
+  if (text.includes('\n') || text.length > 200) {
+    return <pre className="var-longtext">{text}</pre>
+  }
+  return <span className="var-scalar">{text}</span>
+}
+
 function normalizeVariableList(rawVariables) {
   console.log('[DEBUG] normalizeVariableList: input', { type: typeof rawVariables, isArray: Array.isArray(rawVariables), value: rawVariables })
 
@@ -208,7 +276,7 @@ function normalizeVariableList(rawVariables) {
 
       return {
         name,
-        value: formatVariableDisplay(parsed.value),
+        value: parsed.value,
         duration: Number.isFinite(durationValue) ? `${formatNumber(durationValue / 60000, 2)} min` : parsed.duration || '—',
         status: parsed.status === 'Failed' ? 'Failed' : 'Passed',
       }
@@ -228,7 +296,7 @@ function normalizeVariableList(rawVariables) {
 
       return {
         name,
-        value: formatVariableDisplay(parsed.value),
+        value: parsed.value,
         duration: Number.isFinite(durationValue) ? `${formatNumber(durationValue / 60000, 2)} min` : parsed.duration || '—',
         status: parsed.status === 'Failed' ? 'Failed' : 'Passed',
       }
@@ -251,6 +319,7 @@ function App() {
   const [processFilter, setProcessFilter] = useState('all')
   const [instanceSearch, setInstanceSearch] = useState('')
   const [selectedInstance, setSelectedInstance] = useState(null)
+  const [expandedVariables, setExpandedVariables] = useState(() => new Set())
   const [loadingDashboard, setLoadingDashboard] = useState(true)
   const [loadingInstances, setLoadingInstances] = useState(true)
   const [loadingTasks, setLoadingTasks] = useState(true)
@@ -599,6 +668,7 @@ function App() {
 
   const openInstanceDetail = async (instance) => {
     console.log('[DEBUG] openInstanceDetail: opening instance', { instanceKey: instance.processInstanceKey || instance.key, processName: instance.processDefinitionName })
+    setExpandedVariables(new Set())
     const detail = buildInstanceDetail(instance)
     console.log('[DEBUG] openInstanceDetail: built instance detail', { key: detail.key, variablesFromCard: detail.variables.length })
 
@@ -1066,32 +1136,40 @@ function App() {
 
                   <div className="detail-panel">
                     <h4>Process Variables</h4>
-                    <div className="variable-table-wrap">
-                      <table className="variable-table">
-                        <thead>
-                          <tr>
-                            <th>Name</th>
-                            <th>Value</th>
-                            <th>Duration</th>
-                            <th>Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedInstance.variables.length ? selectedInstance.variables.map((variable) => (
-                            <tr key={variable.name}>
-                              <td>{variable.name}</td>
-                              <td>{variable.value}</td>
-                              <td>{variable.duration}</td>
-                              <td><span className={`variable-state ${String(variable.status).toLowerCase()}`}>{variable.status}</span></td>
-                            </tr>
-                          )) : (
-                            <tr>
-                              <td colSpan="4">No variables available.</td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                    {selectedInstance.variables.length ? (
+                      <div className="variable-card-list">
+                        {selectedInstance.variables.map((variable, index) => {
+                          const variableKey = `${variable.name}-${index}`
+                          const isExpanded = expandedVariables.has(variableKey)
+                          return (
+                            <div className="variable-card" key={variableKey}>
+                              <button
+                                type="button"
+                                className="variable-card-header"
+                                onClick={() => setExpandedVariables((current) => {
+                                  const next = new Set(current)
+                                  if (next.has(variableKey)) next.delete(variableKey)
+                                  else next.add(variableKey)
+                                  return next
+                                })}
+                              >
+                                <span className={`variable-card-chevron ${isExpanded ? 'open' : ''}`}>▸</span>
+                                <span className="variable-card-name">{variable.name}</span>
+                                <span className="variable-card-type">{describeVariableType(variable.value)}</span>
+                                {!isExpanded && <span className="variable-card-preview">{previewVariableValue(variable.value)}</span>}
+                              </button>
+                              {isExpanded && (
+                                <div className="variable-card-body">
+                                  <VariableTree value={variable.value} />
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    ) : (
+                      <div className="empty-state">No variables available.</div>
+                    )}
                   </div>
 
                   <div className="detail-panel">
