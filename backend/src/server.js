@@ -403,6 +403,141 @@ async function fetchUserTaskVariables(userTaskKey, headers) {
   }
 }
 
+function normalizeVariableValue(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      return typeof parsed === 'string' ? parsed : parsed;
+    } catch {
+      return value;
+    }
+  }
+
+  return value;
+}
+
+function normalizeProcessVariablesPayload(payload) {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  if (payload && Array.isArray(payload.variables)) {
+    return payload.variables;
+  }
+
+  if (payload && Array.isArray(payload.items)) {
+    return payload.items;
+  }
+
+  if (payload && typeof payload === 'object') {
+    return Object.entries(payload).map(([name, value]) => ({
+      name,
+      value: normalizeVariableValue(value),
+    }));
+  }
+
+  return [];
+}
+
+app.get('/api/process-instances/:instanceKey/variables', async (req, res) => {
+  try {
+    const { instanceKey } = req.params;
+    const operateBaseUrl = (process.env.CAMUNDA_OPERATE_BASE_URL || '').replace(/\/$/, '');
+
+    logDebug('GET /api/process-instances/:instanceKey/variables: incoming request', {
+      instanceKey,
+      operateBaseUrl: operateBaseUrl || 'NOT_CONFIGURED',
+    });
+
+    if (!operateBaseUrl) {
+      logDebug('GET /api/process-instances/:instanceKey/variables: operate base url not configured', {});
+      return res.status(404).json({ ok: false, message: 'Camunda Operate base URL is not configured.' });
+    }
+
+    const candidateUrls = [
+      `${operateBaseUrl}/v1/variables/search`,
+      `${operateBaseUrl}/v2/variables/search`,
+      `${operateBaseUrl}/v1/process-instances/${instanceKey}/variables/search`,
+    ];
+
+    let lastError = null;
+    for (const url of candidateUrls) {
+      try {
+        logDebug('GET /api/process-instances/:instanceKey/variables: trying URL', { url });
+
+        const response = await axios.post(
+          url,
+          {
+            filter: { processInstanceKey: instanceKey },
+            page: { limit: 200 }
+          },
+          {
+            headers: await getZeebeHeaders(),
+            timeout: 20000,
+          }
+        );
+
+        logDebug('GET /api/process-instances/:instanceKey/variables: got response', {
+          url,
+          status: response.status,
+          dataType: typeof response.data,
+          isArray: Array.isArray(response.data),
+          rawData: JSON.stringify(response.data).slice(0, 500),
+        });
+
+        const items = normalizeProcessVariablesPayload(response.data || []);
+        logDebug('GET /api/process-instances/:instanceKey/variables: normalized items', {
+          itemsCount: items.length,
+          items: JSON.stringify(items).slice(0, 500),
+        });
+
+        const mapped = items.map((item) => {
+          const name = item.name || item.key || item.variableName || 'unknown';
+          const value = item.value ?? item.rawValue ?? item.variableValue ?? item;
+          const parsedValue = normalizeVariableValue(value);
+          return {
+            name,
+            value: parsedValue,
+            status: item.status || item.state || (item.failed ? 'Failed' : 'Passed'),
+            duration: item.duration || item.elapsedTime || item.valueDuration || '',
+          };
+        });
+
+        logDebug('GET /api/process-instances/:instanceKey/variables: final mapped response', {
+          count: mapped.length,
+          response: JSON.stringify(mapped).slice(0, 500),
+        });
+
+        return res.json(mapped);
+      } catch (error) {
+        logDebug('GET /api/process-instances/:instanceKey/variables: URL attempt failed', {
+          url,
+          status: error.response && error.response.status,
+          message: error.message,
+        });
+        lastError = error;
+      }
+    }
+
+    throw lastError || new Error('Unable to fetch process instance variables');
+  } catch (error) {
+    logDebug('GET /api/process-instances/:instanceKey/variables: failed', {
+      instanceKey: req.params.instanceKey,
+      status: error.response && error.response.status,
+      data: error.response && error.response.data,
+      message: error.message,
+    });
+    res.status(500).json({ ok: false, message: 'Unable to fetch process instance variables', error: error.message });
+  }
+});
+
 app.get('/api/process-instances', async (req, res) => {
   try {
     const processDefinitionId = req.query.processDefinitionKey || req.query.processId || '';

@@ -45,6 +45,33 @@ function convertDurationToMinutes(value) {
   return num
 }
 
+function parseCamundaDuration(rawValue) {
+  if (rawValue === null || rawValue === undefined) return 0
+
+  const numValue = Number(rawValue)
+  if (Number.isFinite(numValue)) {
+    return convertDurationToMinutes(numValue)
+  }
+
+  const strValue = String(rawValue).trim().toLowerCase()
+  if (!strValue) return 0
+
+  let totalMinutes = 0
+  const daysMatch = strValue.match(/(\d+(?:\.\d+)?)\s*days?/)
+  const hoursMatch = strValue.match(/(\d+(?:\.\d+)?)\s*hours?/)
+  const minutesMatch = strValue.match(/(\d+(?:\.\d+)?)\s*minutes?|mins?/)
+  const secondsMatch = strValue.match(/(\d+(?:\.\d+)?)\s*seconds?|secs?/)
+  const millisMatch = strValue.match(/(\d+(?:\.\d+)?)\s*milliseconds?|ms/)
+
+  if (daysMatch) totalMinutes += Number(daysMatch[1]) * 1440
+  if (hoursMatch) totalMinutes += Number(hoursMatch[1]) * 60
+  if (minutesMatch) totalMinutes += Number(minutesMatch[1])
+  if (secondsMatch) totalMinutes += Number(secondsMatch[1]) / 60
+  if (millisMatch) totalMinutes += Number(millisMatch[1]) / 60000
+
+  return totalMinutes
+}
+
 function inferReportKind(name = '') {
   const normalized = String(name).toLowerCase()
 
@@ -93,6 +120,126 @@ function buildPieStyle(items) {
   }
 }
 
+function normalizeConversationSender(sender = '') {
+  const normalized = String(sender).trim().toLowerCase()
+  if (['user', 'client', 'human', 'customer'].includes(normalized)) return 'client'
+  if (['agent', 'ai', 'assistant', 'bot', 'system', 'reasoning', 'thought'].includes(normalized)) return 'agent'
+  return normalized === 'client' ? 'client' : 'agent'
+}
+
+function parseVariableValue(rawValue) {
+  if (rawValue === null || rawValue === undefined) return { value: '—', duration: '', status: 'Passed' }
+
+  if (typeof rawValue === 'string') {
+    const trimmed = rawValue.trim()
+    if (!trimmed) return { value: '', duration: '', status: 'Passed' }
+
+    try {
+      const parsed = JSON.parse(trimmed)
+      return {
+        value: parsed,
+        duration: '',
+        status: 'Passed',
+      }
+    } catch {
+      return {
+        value: rawValue,
+        duration: '',
+        status: 'Passed',
+      }
+    }
+  }
+
+  if (typeof rawValue === 'object') {
+    const value = 'value' in rawValue ? rawValue.value : rawValue
+    const duration = 'duration' in rawValue ? rawValue.duration : ('elapsedTime' in rawValue ? rawValue.elapsedTime : '')
+    const status = rawValue.status || rawValue.state || (rawValue.failed ? 'Failed' : 'Passed')
+    return {
+      value: typeof value === 'object' ? JSON.stringify(value) : value,
+      duration,
+      status: String(status).toLowerCase() === 'failed' ? 'Failed' : 'Passed',
+    }
+  }
+
+  return {
+    value: rawValue,
+    duration: '',
+    status: 'Passed',
+  }
+}
+
+function formatVariableDisplay(value) {
+  if (value === null || value === undefined) return '—'
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') return String(value)
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value, null, 2)
+    } catch {
+      return String(value)
+    }
+  }
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function normalizeVariableList(rawVariables) {
+  console.log('[DEBUG] normalizeVariableList: input', { type: typeof rawVariables, isArray: Array.isArray(rawVariables), value: rawVariables })
+
+  if (!rawVariables) {
+    console.log('[DEBUG] normalizeVariableList: rawVariables is falsy, returning empty array')
+    return []
+  }
+
+  if (Array.isArray(rawVariables)) {
+    console.log('[DEBUG] normalizeVariableList: processing array', { length: rawVariables.length, items: rawVariables })
+    const mapped = rawVariables.map((item, idx) => {
+      const name = item.name || item.key || item.variableName || item.field || 'unknown'
+      const value = item.value ?? item.rawValue ?? item.variableValue ?? item
+      const parsed = parseVariableValue(value)
+      const durationValue = Number(parsed.duration)
+
+      console.log(`[DEBUG] normalizeVariableList: item[${idx}]`, { name, value, parsed })
+
+      return {
+        name,
+        value: formatVariableDisplay(parsed.value),
+        duration: Number.isFinite(durationValue) ? `${formatNumber(durationValue / 60000, 2)} min` : parsed.duration || '—',
+        status: parsed.status === 'Failed' ? 'Failed' : 'Passed',
+      }
+    })
+    console.log('[DEBUG] normalizeVariableList: array mapping complete', { count: mapped.length })
+    return mapped
+  }
+
+  if (typeof rawVariables === 'object') {
+    const keys = Object.keys(rawVariables)
+    console.log('[DEBUG] normalizeVariableList: processing object', { keys, rawValue: rawVariables })
+    const mapped = Object.entries(rawVariables).map(([name, value], idx) => {
+      const parsed = parseVariableValue(value)
+      const durationValue = Number(parsed.duration)
+
+      console.log(`[DEBUG] normalizeVariableList: entry[${idx}](${name})`, { value, parsed })
+
+      return {
+        name,
+        value: formatVariableDisplay(parsed.value),
+        duration: Number.isFinite(durationValue) ? `${formatNumber(durationValue / 60000, 2)} min` : parsed.duration || '—',
+        status: parsed.status === 'Failed' ? 'Failed' : 'Passed',
+      }
+    })
+    console.log('[DEBUG] normalizeVariableList: object mapping complete', { count: mapped.length })
+    return mapped
+  }
+
+  console.log('[DEBUG] normalizeVariableList: returning empty array, type not recognized', { type: typeof rawVariables })
+  return []
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('Dashboard')
   const [insights, setInsights] = useState(null)
@@ -106,6 +253,7 @@ function App() {
   const [loadingDashboard, setLoadingDashboard] = useState(true)
   const [loadingInstances, setLoadingInstances] = useState(true)
   const [loadingTasks, setLoadingTasks] = useState(true)
+  const [refreshingTasks, setRefreshingTasks] = useState(false)
   const [error, setError] = useState('')
 
   const selectedTask = useMemo(
@@ -113,63 +261,124 @@ function App() {
     [tasks, selectedTaskId],
   )
 
-  useEffect(() => {
-    async function fetchDashboard() {
-      try {
-        const query = new URLSearchParams({ processId: processDefinitionKey })
-        const response = await fetch(`${apiBase}/api/dashboard/${dashboardId}/insights?${query.toString()}`)
-        if (!response.ok) {
-          throw new Error(`Dashboard request failed with code ${response.status}`)
-        }
-        const payload = await response.json()
-        setInsights(payload)
-      } catch (err) {
-        setError(err.message)
-      } finally {
-        setLoadingDashboard(false)
+  const fetchDashboard = async () => {
+    try {
+      const query = new URLSearchParams({ processId: processDefinitionKey })
+      const response = await fetch(`${apiBase}/api/dashboard/${dashboardId}/insights?${query.toString()}`)
+      if (!response.ok) {
+        throw new Error(`Dashboard request failed with code ${response.status}`)
       }
+      const payload = await response.json()
+      setInsights(payload)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoadingDashboard(false)
     }
+  }
 
-    async function fetchInstances() {
-      try {
-        const params = new URLSearchParams({ processInstanceKey, state: processFilter === 'all' ? '' : processFilter })
-        const response = await fetch(`${apiBase}/api/process-instances?${params.toString()}`)
-        if (!response.ok) {
-          setInstances([])
-          return
-        }
-        const payload = await response.json()
-        setInstances(Array.isArray(payload) ? payload : payload.items || [])
-      } catch (err) {
+  const fetchInstances = async () => {
+    try {
+      const params = new URLSearchParams({ processInstanceKey, state: processFilter === 'all' ? '' : processFilter })
+      const response = await fetch(`${apiBase}/api/process-instances?${params.toString()}`)
+      if (!response.ok) {
         setInstances([])
-      } finally {
-        setLoadingInstances(false)
+        return
       }
+      const payload = await response.json()
+      setInstances(Array.isArray(payload) ? payload : payload.items || [])
+    } catch (err) {
+      setInstances([])
+    } finally {
+      setLoadingInstances(false)
+    }
+  }
+
+  const fetchTasks = async ({ suppressLoading = false } = {}) => {
+    try {
+      if (!suppressLoading) {
+        setLoadingTasks(true)
+      }
+      setRefreshingTasks(!suppressLoading)
+      const params = new URLSearchParams({ processInstanceKey })
+      const url = `${apiBase}/api/tasklist?${params.toString()}`
+      console.log('[DEBUG] fetchTasks: requesting', { url, processInstanceKey })
+
+      const response = await fetch(url)
+      console.log('[DEBUG] fetchTasks: response', { status: response.status, ok: response.ok })
+
+      if (!response.ok) {
+        throw new Error(`Tasklist request failed with code ${response.status}`)
+      }
+      const payload = await response.json()
+      console.log('[DEBUG] fetchTasks: payload received', { payloadType: typeof payload, isArray: Array.isArray(payload), count: Array.isArray(payload) ? payload.length : payload.items ? payload.items.length : 0, payload })
+
+      const nextTasks = Array.isArray(payload) ? payload : payload.items || []
+      console.log('[DEBUG] fetchTasks: normalized tasks', { count: nextTasks.length, taskIds: nextTasks.map((t) => t.id || t.userTaskKey) })
+
+      setTasks(nextTasks)
+      if (!selectedTaskId && nextTasks[0]) {
+        setSelectedTaskId(nextTasks[0].id)
+      }
+    } catch (err) {
+      console.error('[DEBUG] fetchTasks: error', { error: err.message })
+      setError(err.message)
+    } finally {
+      setLoadingTasks(false)
+      setRefreshingTasks(false)
+    }
+  }
+
+  const fetchInstanceVariables = async (instanceKey) => {
+    if (!instanceKey) {
+      console.warn('[DEBUG] fetchInstanceVariables: instanceKey is empty or falsy', { instanceKey })
+      return []
     }
 
-    async function fetchTasks() {
-      try {
-        const params = new URLSearchParams({ processInstanceKey })
-        const response = await fetch(`${apiBase}/api/tasklist?${params.toString()}`)
-        if (!response.ok) {
-          throw new Error(`Tasklist request failed with code ${response.status}`)
-        }
-        const payload = await response.json()
-        const nextTasks = Array.isArray(payload) ? payload : payload.items || []
-        setTasks(nextTasks)
-        if (!selectedTaskId && nextTasks[0]) {
-          setSelectedTaskId(nextTasks[0].id)
-        }
-      } catch (err) {
-        setError(err.message)
-      } finally {
-        setLoadingTasks(false)
-      }
-    }
+    console.log('[DEBUG] fetchInstanceVariables: starting fetch', { instanceKey, apiBase })
 
-    fetchDashboard()
-    fetchInstances()
-    fetchTasks()
+    try {
+      const url = `${apiBase}/api/process-instances/${instanceKey}/variables`
+      console.log('[DEBUG] fetchInstanceVariables: requesting URL', { url })
+
+      const response = await fetch(url)
+      console.log('[DEBUG] fetchInstanceVariables: response received', { status: response.status, statusText: response.statusText, ok: response.ok })
+
+      if (!response.ok) {
+        const errorBody = await response.text()
+        console.error('[DEBUG] fetchInstanceVariables: response not ok', { status: response.status, errorBody, url })
+        return []
+      }
+
+      const payload = await response.json()
+      console.log('[DEBUG] fetchInstanceVariables: RAW API PAYLOAD', { payloadType: typeof payload, isArray: Array.isArray(payload), payloadLength: Array.isArray(payload) ? payload.length : 'n/a', payload })
+
+      const normalized = normalizeVariableList(payload)
+      console.log('[DEBUG] fetchInstanceVariables: normalized variables', { normalizedLength: normalized.length, normalized })
+
+      if (normalized.length === 0) {
+        console.warn('[DEBUG] fetchInstanceVariables: EMPTY RESULT - check backend logs', { url, instanceKey, payload })
+      }
+
+      return normalized
+    } catch (err) {
+      console.error('[DEBUG] fetchInstanceVariables: caught error', { error: err.message, stack: err.stack, url: `${apiBase}/api/process-instances/${instanceKey}/variables` })
+      return []
+    }
+  }
+
+  const refreshAllData = async () => {
+    setError('')
+    setLoadingInstances(true)
+    setLoadingTasks(true)
+    setLoadingDashboard(true)
+    await Promise.all([fetchDashboard(), fetchInstances(), fetchTasks({ suppressLoading: false })])
+  }
+
+  useEffect(() => {
+    void fetchDashboard()
+    void fetchInstances()
+    void fetchTasks()
   }, [processFilter])
 
   useEffect(() => {
@@ -195,16 +404,12 @@ function App() {
 
   const buildInstanceDetail = (instance) => {
     const key = instance.processInstanceKey || instance.key || instance.id || 'Unknown instance'
-    const processName = instance.processDefinitionKey || instance.processDefinitionId || instance.processName || 'Process'
+    const processName = instance.processDefinitionName || instance.processName || instance.processDefinitionKey || instance.processDefinitionId || 'Process'
     const started = instance.startDate || instance.createdAt || 'N/A'
     const ended = instance.endDate || instance.completedAt || instance.updatedAt || 'N/A'
     const status = normalizeInstanceState(instance.state || 'active')
 
-    const variables = Object.entries(instance.variables || {}).map(([name, value]) => ({
-      name,
-      value: typeof value === 'object' && value !== null && 'value' in value ? value.value : value,
-      status: status === 'failed' ? 'failed' : status === 'completed' ? 'completed' : 'ongoing',
-    }))
+    const variablesFromInstance = normalizeVariableList(instance.variables || [])
 
     const subprocesses = Array.isArray(instance.subprocesses)
       ? instance.subprocesses.map((subprocess) => ({
@@ -215,10 +420,18 @@ function App() {
       : []
 
     const conversation = Array.isArray(instance.conversation)
-      ? instance.conversation.map((entry) => ({
-          sender: entry.sender || 'agent',
-          message: entry.message || entry.text || '',
-        }))
+      ? instance.conversation.map((entry) => {
+          const sender = normalizeConversationSender(entry.sender || entry.role || entry.author || 'agent')
+          const rawMessage = entry.message || entry.text || entry.content || entry.summary || ''
+          const isReasoning = Boolean(
+            entry.isReasoning || entry.reasoning || entry.thought || entry.internalThought || entry.type === 'reasoning'
+          )
+          return {
+            sender,
+            message: String(rawMessage || 'No message available.'),
+            isReasoning,
+          }
+        })
       : []
 
     return {
@@ -228,7 +441,7 @@ function App() {
       started,
       ended,
       status,
-      variables: variables.length ? variables : [],
+      variables: variablesFromInstance.length ? variablesFromInstance : [],
       subprocesses,
       conversation,
     }
@@ -254,9 +467,10 @@ function App() {
   }, [instances, processFilter, instanceSearch])
 
   const processInstanceCounts = useMemo(() => {
-    const counts = { all: instances.length, completed: 0, cancelled: 0, failed: 0 }
+    const counts = { all: instances.length, active: 0, completed: 0, cancelled: 0, failed: 0 }
     instances.forEach((instance) => {
       const state = normalizeInstanceState(instance.state)
+      if (state === 'active') counts.active += 1
       if (state === 'completed') counts.completed += 1
       if (state === 'cancelled') counts.cancelled += 1
       if (state === 'failed') counts.failed += 1
@@ -303,7 +517,12 @@ function App() {
   }
 
   const submitTaskCompletion = async (task, formValues = {}) => {
-    if (!task) return
+    if (!task) {
+      console.warn('[DEBUG] submitTaskCompletion: no task provided')
+      return
+    }
+
+    console.log('[DEBUG] submitTaskCompletion: submitting task', { taskId: task.id, userTaskKey: task.userTaskKey, formValues })
 
     const variables = Object.fromEntries(
       Object.entries(formValues).map(([key, value]) => {
@@ -312,19 +531,36 @@ function App() {
       }),
     )
 
-    const response = await fetch(`${apiBase}/api/tasks/${task.id}/completion`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ variables }),
-    })
+    console.log('[DEBUG] submitTaskCompletion: normalized variables', { variables })
 
-    if (!response.ok) {
-      throw new Error('Unable to submit task')
-    }
+    try {
+      const url = `${apiBase}/api/tasks/${task.id}/completion`
+      console.log('[DEBUG] submitTaskCompletion: POST to', { url })
 
-    setTasks((current) => current.filter((nextTask) => nextTask.id !== task.id))
-    if (selectedTaskId === task.id) {
-      setSelectedTaskId('')
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ variables }),
+      })
+
+      console.log('[DEBUG] submitTaskCompletion: response', { status: response.status, ok: response.ok })
+
+      if (!response.ok) {
+        const errorBody = await response.text()
+        console.error('[DEBUG] submitTaskCompletion: response not ok', { status: response.status, errorBody })
+        throw new Error('Unable to submit task')
+      }
+
+      const responseData = await response.json()
+      console.log('[DEBUG] submitTaskCompletion: success', { responseData })
+
+      setTasks((current) => current.filter((nextTask) => nextTask.id !== task.id))
+      if (selectedTaskId === task.id) {
+        setSelectedTaskId('')
+      }
+    } catch (err) {
+      console.error('[DEBUG] submitTaskCompletion: error', { error: err.message })
+      throw err
     }
   }
 
@@ -351,13 +587,80 @@ function App() {
   const handleTaskSubmit = async (event) => {
     event.preventDefault()
     if (!selectedTask) return
-    await submitTaskCompletion(selectedTask, taskForm)
+
+    const nextFormValues = { ...taskForm }
+    if (nextFormValues.ai_instruction !== undefined && !Object.prototype.hasOwnProperty.call(nextFormValues, 'ai_instruction')) {
+      nextFormValues.ai_instruction = nextFormValues.ai_instruction
+    }
+
+    await submitTaskCompletion(selectedTask, nextFormValues)
+  }
+
+  const openInstanceDetail = async (instance) => {
+    console.log('[DEBUG] openInstanceDetail: opening instance', { instanceKey: instance.processInstanceKey || instance.key, processName: instance.processDefinitionName })
+    const detail = buildInstanceDetail(instance)
+    console.log('[DEBUG] openInstanceDetail: built instance detail', { key: detail.key, variablesFromCard: detail.variables.length })
+
+    const fetchedVariables = await fetchInstanceVariables(detail.key)
+    console.log('[DEBUG] openInstanceDetail: fetched variables', { count: fetchedVariables.length, variables: fetchedVariables })
+
+    const finalVariables = fetchedVariables.length ? fetchedVariables : detail.variables
+    console.log('[DEBUG] openInstanceDetail: using variables', { source: fetchedVariables.length ? 'fetched' : 'instance-detail', count: finalVariables.length })
+
+    setSelectedInstance({
+      ...detail,
+      variables: finalVariables,
+    })
   }
 
   const renderDashboardVisual = (report) => {
     const reportName = report.name || ''
     const rows = Array.isArray(report.dataPreview) ? report.dataPreview : []
     const kind = inferReportKind(reportName)
+
+    if (reportName.toLowerCase().includes('overall process traffic')) {
+      const trafficRows = (rows.length ? rows : [{ value: report.value || 0, label: 'Overall process traffic' }]).map((row) => ({
+        ...row,
+        value: parseCamundaDuration(row.value),
+        label: String(row.label || row.key || row.name || 'Process')
+      }))
+      const maxValue = Math.max(...trafficRows.map((row) => row.value || 0), 1)
+      const yTicks = Array.from({ length: 5 }, (_, index) => {
+        const tickValue = maxValue * (index / 4)
+        return Math.round(tickValue * 100) / 100
+      }).reverse()
+
+      return (
+        <div className="chart-with-axes">
+          <div className="chart-y-axis-label">Duration (minutes)</div>
+          <div className="chart-plot-area">
+            <div className="y-axis-scale" aria-hidden="true">
+              {yTicks.map((tick) => (
+                <span key={`traffic-tick-${tick}`} className="y-axis-tick">{formatNumber(tick, 2)}</span>
+              ))}
+            </div>
+            <div className="bar-chart-shell traffic-bar-chart-shell" aria-label={`${report.name} traffic chart`}>
+              {trafficRows.slice(0, 8).map((row, index) => {
+                const label = String(row.label || row.key || row.name || `Process ${index + 1}`)
+                const barValue = Number(row.value) || 0
+                const barHeightPercent = maxValue > 0 ? Math.max(4, (barValue / maxValue) * 100) : 4
+
+                return (
+                  <div key={`${report.id}-traffic-${index}`} className="bar-chart-column traffic-bar-column">
+                    <span
+                      className="report-bar traffic-report-bar"
+                      style={{ height: `${Math.min(100, barHeightPercent)}%` }}
+                    />
+                    <span className="bar-chart-label">{label.slice(0, 12)}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+          <div className="chart-x-axis-label">Process name</div>
+        </div>
+      )
+    }
 
     if (kind === 'token-cost') {
       return (
@@ -378,7 +681,7 @@ function App() {
     if (kind === 'duration') {
       const durationRows = (rows.length ? rows : [{ value: report.value, label: report.name || 'Value' }]).map((row) => ({
         ...row,
-        value: convertDurationToMinutes(row.value),
+        value: parseCamundaDuration(row.value),
       }))
       const maxValue = Math.max(...durationRows.map((row) => Number(row.value) || 0), 1)
       const yTicks = Array.from({ length: 5 }, (_, index) => {
@@ -408,6 +711,7 @@ function App() {
         const primaryRow = preferredRow || { value: report.value, label: report.name || 'Value' }
         const label = String(primaryRow.label || primaryRow.key || primaryRow.name || 'Value')
         const barValue = Number(primaryRow.value) || 0
+        const barHeightPercent = maxValue > 0 ? Math.max(4, (barValue / maxValue) * 100) : 4
 
         return (
           <div className="chart-with-axes compact-chart">
@@ -422,7 +726,7 @@ function App() {
                 <div className="bar-chart-column single-bar-column">
                   <span
                     className="report-bar single-report-bar"
-                    style={{ height: `${Math.min(100, (barValue / maxValue) * 100)}%` }}
+                    style={{ height: `${Math.min(100, barHeightPercent)}%` }}
                   />
                   <span className="bar-chart-label">{label.slice(0, 12)}</span>
                 </div>
@@ -446,12 +750,13 @@ function App() {
               {durationRows.slice(0, 9).map((row, index) => {
                 const label = String(row.label || row.key || row.name || `Item ${index + 1}`)
                 const barValue = Number(row.value) || 0
+                const barHeightPercent = maxValue > 0 ? Math.max(4, (barValue / maxValue) * 100) : 4
 
                 return (
                   <div key={`${report.id}-duration-${index}`} className="bar-chart-column">
                     <span
                       className="report-bar"
-                      style={{ height: `${Math.min(100, (barValue / maxValue) * 100)}%` }}
+                      style={{ height: `${Math.min(100, barHeightPercent)}%` }}
                     />
                     <span className="bar-chart-label">{label.slice(0, 10)}</span>
                   </div>
@@ -577,16 +882,56 @@ function App() {
             <p>Showing {dashboardCards.length} reports from Camunda Optimize</p>
           </div>
 
-          <section className="report-cards-grid">
-            {dashboardCards.length ? dashboardCards.map((report) => (
-              <article key={report.id || report.name} className="report-card">
-                <div className="report-card-header">
-                  <h3>{report.name || 'Report'}</h3>
-                </div>
-                {renderDashboardVisual(report)}
-              </article>
-            )) : <div className="empty-state">No dashboard reports available.</div>}
-          </section>
+          {dashboardCards.length ? (
+            <>
+              {/* Row 1: First 2 cards in 2-column layout */}
+              <section className="report-cards-grid-2col">
+                {dashboardCards.slice(0, 2).map((report) => (
+                  <article key={report.id || report.name} className="report-card">
+                    <div className="report-card-header">
+                      <h3>{report.name || 'Report'}</h3>
+                    </div>
+                    {renderDashboardVisual(report)}
+                  </article>
+                ))}
+              </section>
+
+              {/* Row 2: Overall process traffic in full width */}
+              {dashboardCards.some((card) => String(card.name || '').toLowerCase().includes('overall process traffic')) && (
+                <section className="report-cards-grid-full">
+                  {dashboardCards
+                    .filter((card) => String(card.name || '').toLowerCase().includes('overall process traffic'))
+                    .map((report) => (
+                      <article key={report.id || report.name} className="report-card">
+                        <div className="report-card-header">
+                          <h3>{report.name || 'Report'}</h3>
+                        </div>
+                        {renderDashboardVisual(report)}
+                      </article>
+                    ))}
+                </section>
+              )}
+
+              {/* Row 3: Remaining cards in 3-column layout */}
+              {dashboardCards.length > 3 && (
+                <section className="report-cards-grid-3col">
+                  {dashboardCards
+                    .slice(2)
+                    .filter((card) => !String(card.name || '').toLowerCase().includes('overall process traffic'))
+                    .map((report) => (
+                      <article key={report.id || report.name} className="report-card">
+                        <div className="report-card-header">
+                          <h3>{report.name || 'Report'}</h3>
+                        </div>
+                        {renderDashboardVisual(report)}
+                      </article>
+                    ))}
+                </section>
+              )}
+            </>
+          ) : (
+            <div className="empty-state">No dashboard reports available.</div>
+          )}
         </main>
       )}
 
@@ -597,7 +942,7 @@ function App() {
               <h2>Process Instances</h2>
               <p>Monitor and inspect workflow executions from Camunda Operate</p>
             </div>
-            <button type="button" className="refresh-button">↻ Refresh</button>
+            <button type="button" className="refresh-button" onClick={() => void refreshAllData()}>↻ Refresh</button>
           </div>
 
           <div className="instances-toolbar">
@@ -611,14 +956,25 @@ function App() {
               />
             </div>
 
-            <div className="toolbar-select-group">
-              <button type="button" className="toolbar-select">All Processes <span>▾</span></button>
-              <button type="button" className="toolbar-select">All Versions <span>▾</span></button>
-            </div>
           </div>
 
           <div className="status-filter-row">
-            {['all', 'completed', 'cancelled', 'failed'].map((state) => (
+            <div className="status-filter-select-wrap">
+              <label htmlFor="process-state-filter" className="status-filter-label">State</label>
+              <select
+                id="process-state-filter"
+                className="status-filter-select"
+                value={processFilter}
+                onChange={(event) => setProcessFilter(event.target.value)}
+              >
+                <option value="all">All</option>
+                <option value="active">Active</option>
+                <option value="completed">Completed</option>
+                <option value="cancelled">Cancelled</option>
+                <option value="failed">Failed</option>
+              </select>
+            </div>
+            {['all', 'active', 'completed', 'cancelled', 'failed'].map((state) => (
               <button
                 key={state}
                 type="button"
@@ -641,17 +997,15 @@ function App() {
                 const stateClass = instanceState === 'completed' ? 'status-completed' : instanceState === 'cancelled' ? 'status-cancelled' : instanceState === 'failed' ? 'status-failed' : 'status-active'
 
                 return (
-                  <article key={instance.id || instance.key || instance.processInstanceKey} className="instance-dashboard-card" onClick={() => setSelectedInstance(detail)}>
+                  <article key={instance.id || instance.key || instance.processInstanceKey} className="instance-dashboard-card" onClick={() => void openInstanceDetail(instance)}>
                     <div className="instance-card-header">
-                      <div className="instance-key-block">INSTANCE KEY</div>
+                      <div className="instance-key-block">PROCESS</div>
                       <span className={`mini-status ${stateClass}`}>{instanceState.toUpperCase()}</span>
                     </div>
 
-                    <div className="instance-key-value">#{instance.processInstanceKey || instance.key || 'Unknown instance'}</div>
-
                     <div className="process-title-block">
-                      <span className="process-label">PROCESS</span>
-                      <div className="process-name">{instance.processDefinitionKey || instance.processDefinitionId || detail.processName}</div>
+                      <div className="process-name">{detail.processName}</div>
+                      <div className="instance-key-value">#{instance.processInstanceKey || instance.key || 'Unknown instance'}</div>
                       <div className="process-version">Version {detail.version}</div>
                     </div>
 
@@ -660,7 +1014,16 @@ function App() {
                       <div className="meta-row"><span>Ended</span><strong>{detail.ended}</strong></div>
                     </div>
 
-                    <button type="button" className="view-button">View Variables →</button>
+                    <button
+                      type="button"
+                      className="view-button"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void openInstanceDetail(instance)
+                      }}
+                    >
+                      View Variables →
+                    </button>
                   </article>
                 )
               }) : <div className="empty-state">No process instances found for this state.</div>}
@@ -672,8 +1035,8 @@ function App() {
               <div className="instance-modal" onClick={(event) => event.stopPropagation()}>
                 <div className="instance-modal-header">
                   <div>
-                    <span className="modal-label">Instance key</span>
-                    <h3>{selectedInstance.key}</h3>
+                    <span className="modal-label">Process</span>
+                    <h3>{selectedInstance.processName}</h3>
                   </div>
                   <button type="button" className="modal-close" onClick={() => setSelectedInstance(null)}>×</button>
                 </div>
@@ -682,27 +1045,58 @@ function App() {
                   <span className={`mini-status ${selectedInstance.status === 'completed' ? 'status-completed' : selectedInstance.status === 'cancelled' ? 'status-cancelled' : selectedInstance.status === 'failed' ? 'status-failed' : 'status-active'}`}>
                     {selectedInstance.status.toUpperCase()}
                   </span>
-                  <span className="modal-process-name">{selectedInstance.processName}</span>
+                  <span className="modal-instance-key">#{selectedInstance.key}</span>
                 </div>
 
-                <div className="detail-grid">
-                  <div className="detail-panel">
-                    <h4>Process variables</h4>
-                    <div className="variable-list">
-                      {selectedInstance.variables.map((variable) => (
-                        <div key={variable.name} className="variable-row">
-                          <div className="variable-name">{variable.name}</div>
-                          <div className="variable-value">{variable.value}</div>
-                          <span className={`variable-state ${variable.status}`}>{variable.status}</span>
+                <div className="detail-stack">
+                  <div className="chat-panel">
+                    <h4>AI Agent Conversation</h4>
+                    <div className="chat-thread">
+                      {selectedInstance.conversation.length ? selectedInstance.conversation.map((entry, index) => (
+                        <div key={`${entry.sender}-${index}`} className={`chat-bubble ${entry.sender} ${entry.isReasoning ? 'reasoning' : ''}`}>
+                          <span className="chat-author">
+                            {entry.isReasoning ? 'AI Reasoning' : entry.sender === 'client' ? 'Client' : 'AI Agent'}
+                          </span>
+                          <p>{entry.message}</p>
                         </div>
-                      ))}
+                      )) : <div className="empty-state">No conversation history available.</div>}
+                    </div>
+                  </div>
+
+                  <div className="detail-panel">
+                    <h4>Process Variables</h4>
+                    <div className="variable-table-wrap">
+                      <table className="variable-table">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>Value</th>
+                            <th>Duration</th>
+                            <th>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedInstance.variables.length ? selectedInstance.variables.map((variable) => (
+                            <tr key={variable.name}>
+                              <td>{variable.name}</td>
+                              <td>{variable.value}</td>
+                              <td>{variable.duration}</td>
+                              <td><span className={`variable-state ${String(variable.status).toLowerCase()}`}>{variable.status}</span></td>
+                            </tr>
+                          )) : (
+                            <tr>
+                              <td colSpan="4">No variables available.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
                     </div>
                   </div>
 
                   <div className="detail-panel">
                     <h4>Subprocesses</h4>
                     <div className="subprocess-list">
-                      {selectedInstance.subprocesses.map((subprocess) => (
+                      {selectedInstance.subprocesses.length ? selectedInstance.subprocesses.map((subprocess) => (
                         <div key={subprocess.name} className="subprocess-row">
                           <div>
                             <div className="subprocess-name">{subprocess.name}</div>
@@ -710,20 +1104,8 @@ function App() {
                           </div>
                           <span className={`subprocess-status ${subprocess.status}`}>{subprocess.status}</span>
                         </div>
-                      ))}
+                      )) : <div className="empty-state">No subprocesses found.</div>}
                     </div>
-                  </div>
-                </div>
-
-                <div className="chat-panel">
-                  <h4>AI agent conversation</h4>
-                  <div className="chat-thread">
-                    {selectedInstance.conversation.map((entry, index) => (
-                      <div key={`${entry.sender}-${index}`} className={`chat-bubble ${entry.sender}`}>
-                        <span className="chat-author">{entry.sender === 'agent' ? 'AI Agent' : 'Client'}</span>
-                        <p>{entry.message}</p>
-                      </div>
-                    ))}
                   </div>
                 </div>
               </div>
@@ -748,7 +1130,20 @@ function App() {
               <div className="task-list-panel">
                 <div className="task-list-header-row">
                   <h3>Tasks</h3>
-                  <span className="task-count-badge">{tasks.length}</span>
+                  <div className="task-header-actions">
+                    <span className="task-count-badge">{tasks.length}</span>
+                    <button
+                      type="button"
+                      className="refresh-button task-refresh-button"
+                      onClick={() => {
+                        setRefreshingTasks(true)
+                        void fetchTasks({ suppressLoading: false })
+                      }}
+                      disabled={refreshingTasks}
+                    >
+                      {refreshingTasks ? 'Refreshing…' : '↻ Refresh'}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="task-list">
@@ -805,17 +1200,29 @@ function App() {
                     <span className="state-badge pending">{selectedTask.status || 'open'}</span>
                   </div>
 
-                  <div className="field-list">
-                    {Object.entries(selectedTask.variables || {}).map(([fieldKey, fieldValue]) => (
-                      <label key={`${selectedTask.id}-${fieldKey}`} className="field-row">
-                        <span>{fieldKey}</span>
-                        <input
-                          type={typeof fieldValue === 'number' ? 'number' : 'text'}
-                          value={taskForm[fieldKey] ?? ''}
-                          onChange={(event) => handleTaskInputChange(fieldKey, event.target.value)}
-                        />
-                      </label>
-                    ))}
+                  <div className="task-summary-panel">
+                    <label className="field-row">
+                      <span>Escalation Summary</span>
+                      <div className="summary-block">
+                        {(() => {
+                          const summaryValue = Object.entries(selectedTask.variables || {}).find(([key]) => key.toLowerCase() === 'escalation_summary')?.[1]
+                          const parsedSummary = parseVariableValue(summaryValue)
+                          return formatVariableDisplay(parsedSummary.value)
+                        })()}
+                      </div>
+                    </label>
+                  </div>
+
+                  <div className="field-list ai-instructions-panel">
+                    <label className="field-row">
+                      <span>What would you like the AI to do?</span>
+                      <textarea
+                        value={taskForm.ai_instruction ?? ''}
+                        onChange={(event) => handleTaskInputChange('ai_instruction', event.target.value)}
+                        placeholder="General Instructions for the AI (Use this if you are not forcing a specific date or drafting exact messages)"
+                        rows={5}
+                      />
+                    </label>
                   </div>
 
                   <div className="task-form-actions">
