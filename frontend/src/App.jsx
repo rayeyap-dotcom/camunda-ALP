@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
+import logoUrl from './assets/logo.svg'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000'
 const dashboardId = import.meta.env.VITE_DASHBOARD_ID || 'e601bcb9-b11a-4086-9ae3-88c7b825269c'
@@ -850,7 +851,7 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand-group">
-          <img className="brand-logo" src="/src/assets/logo.svg" alt="Application Lifecycle Processing" />
+          <img className="brand-logo" src={logoUrl} alt="Application Lifecycle Processing" />
           <div className="brand-copy">
             <div className="brand-subtitle">Application Lifecycle Processing</div>
           </div>
